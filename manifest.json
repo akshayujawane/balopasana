@@ -1,0 +1,25 @@
+{
+  "name": "बालोपासना - परमपूज्य आई श्रीकलावतीदेवी",
+  "short_name": "बालोपासना",
+  "description": "परमपूज्य आई श्रीकलावतीदेवी रचित दैनंदिन बालोपासना प्रार्थना संग्रह",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#FFFBF2",
+  "theme_color": "#D97706",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
