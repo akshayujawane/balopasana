@@ -1,4 +1,4 @@
-const CACHE_NAME = 'balopasana-v1';
+const CACHE_NAME = 'balopasana-v2';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
