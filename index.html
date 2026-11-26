@@ -222,7 +222,7 @@
       width: 100%;
       max-width: 680px;
       margin: 0 auto;
-      padding: 20px 16px 104px;
+      padding: 20px 16px 160px;
     }
 
     .reading-footer {
@@ -900,6 +900,54 @@
       max-width: 90vw;
       text-align: center;
     }
+
+    /* =========================================================================
+       FLOATING MARATHI VOICE PLAYER BAR (TTS)
+       ========================================================================= */
+    .tts-bar {
+      position: fixed;
+      bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 25;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background-color: var(--surface);
+      border: 1.5px solid var(--accent);
+      border-radius: 999px;
+      padding: 6px 12px;
+      box-shadow: var(--shadow-lg);
+      transition: bottom 0.2s ease, background-color 0.2s ease, border-color 0.2s ease;
+    }
+
+    .tts-bar.with-footer {
+      bottom: calc(74px + env(safe-area-inset-bottom, 0px));
+    }
+
+    .tts-bar button {
+      background-color: var(--accent);
+      color: var(--accent-text);
+      border: none;
+      border-radius: 999px;
+      padding: 8px 15px;
+      font-size: 0.9rem;
+      font-weight: 700;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background-color 0.15s ease, transform 0.1s ease;
+    }
+
+    .tts-bar button:active {
+      transform: scale(0.97);
+    }
+
+    .tts-bar button.tts-secondary {
+      background-color: var(--surface-soft);
+      color: var(--text);
+      border: 1px solid var(--border-strong);
+      padding: 8px 12px;
+    }
   </style>
 </head>
 <body>
@@ -980,6 +1028,16 @@
       </button>
     </div>
   </footer>
+
+  <!-- ===================================================================== -->
+  <!-- FLOATING MARATHI VOICE PLAYER BAR (FEMALE + MALE VOICES)              -->
+  <!-- ===================================================================== -->
+  <div id="tts-bar" class="tts-bar" aria-label="मराठी प्रार्थना ऑडिओ (Marathi Prayer Audio)">
+    <button id="ttsPlayBtn" type="button">🔊 ऐका</button>
+    <button id="ttsStopBtn" class="tts-secondary" type="button" hidden>⏹ थांबवा</button>
+    <button id="ttsVoiceBtn" class="tts-secondary" type="button" aria-label="आवाज बदला (Switch Female/Male Voice)">👩 महिला</button>
+    <button id="ttsSpeedBtn" class="tts-secondary" type="button" aria-label="वेग बदला (Change Speed)">1x</button>
+  </div>
 
   <!-- ===================================================================== -->
   <!-- SLIDE-OUT CHAPTER NAVIGATION DRAWER                                   -->
@@ -1712,6 +1770,7 @@
     function renderHome() {
       els.headerSubtitle.textContent = "परमपूज्य आई श्रीकलावतीदेवी";
       els.footer.classList.add("hidden");
+      if (window.syncBalopasanaTts) window.syncBalopasanaTts(false);
 
       const aaiImgHtml = buildImageWithFallback(
         APP_IMAGES.kalavatiAai,
@@ -1797,6 +1856,7 @@
 
       els.headerSubtitle.textContent = `${ch.number}. ${ch.title}`;
       els.footer.classList.remove("hidden");
+      if (window.syncBalopasanaTts) window.syncBalopasanaTts(true);
 
       els.btnPrevChapter.disabled = index === 0;
       els.btnNextChapter.disabled = index === BALOPASANA_DATA.length - 1;
@@ -1892,6 +1952,7 @@
      * =========================================================================
      */
     function navigateHome() {
+      if (window.stopBalopasanaTts) window.stopBalopasanaTts();
       state.view = "home";
       renderHome();
       renderDrawer();
@@ -1900,6 +1961,7 @@
 
     function navigateChapter(index) {
       if (index < 0 || index >= BALOPASANA_DATA.length) return;
+      if (window.stopBalopasanaTts) window.stopBalopasanaTts();
       state.view = "chapter";
       state.chapterIndex = index;
       renderChapter(index);
@@ -2072,12 +2134,225 @@
       syncWakeLock(false);
     })();
   </script>
+
+  <!-- Dual-Voice Marathi Audio Player (Embedded Neural MP3 + Fallback TTS) & PWA Service Worker -->
   <script>
-  if ('serviceWorker' in navigator) {
-    window.addEventListener('load', () => {
-      navigator.serviceWorker.register('./sw.js');
-    });
-  }
-</script>
+    /**
+     * Embedded Base64 Marathi Neural Audio (Populated by build_marathi_audio.py)
+     * female: mr-IN-AarohiNeural | male: mr-IN-ManoharNeural
+     */
+    const EMBEDDED_MARATHI_AUDIO = /*__MARATHI_AUDIO_JSON__*/ {
+      "female": {},
+      "male": {}
+    } /*__END_MARATHI_AUDIO_JSON__*/;
+
+    (function () {
+      const bar = document.getElementById("tts-bar");
+      const playBtn = document.getElementById("ttsPlayBtn");
+      const stopBtn = document.getElementById("ttsStopBtn");
+      const voiceBtn = document.getElementById("ttsVoiceBtn");
+      const speedBtn = document.getElementById("ttsSpeedBtn");
+
+      if (!bar || !playBtn || !stopBtn || !voiceBtn || !speedBtn) return;
+
+      const VOICE_STORAGE_KEY = "balopasana_voice_gender";
+      const speeds = [0.85, 1.0, 1.15];
+      let speedIndex = 1; // Default 1.0x (neural audio is already recorded at a calm devotional pace)
+      let currentGender = (function () {
+        try {
+          const saved = localStorage.getItem(VOICE_STORAGE_KEY);
+          return saved === "male" ? "male" : "female";
+        } catch (e) {
+          return "female";
+        }
+      })();
+
+      // HTML5 Audio element for embedded Indian Marathi Neural MP3s
+      const audioEl = new Audio();
+      audioEl.preload = "none";
+
+      // Fallback Web Speech API state (used only if embedded MP3 is not yet populated)
+      const synth = "speechSynthesis" in window ? window.speechSynthesis : null;
+      let chunks = [];
+      let currentIndex = 0;
+      let isPlaying = false;
+      let isPaused = false;
+      let activeMode = null; // "mp3" | "tts" | null
+
+      function updateVoiceButton() {
+        voiceBtn.textContent = currentGender === "female" ? "👩 महिला" : "👨 पुरुष";
+      }
+      updateVoiceButton();
+
+      function getCurrentPageId() {
+        if (typeof state !== "undefined" && state.view === "chapter" && typeof BALOPASANA_DATA !== "undefined") {
+          const ch = BALOPASANA_DATA[state.chapterIndex];
+          if (ch && ch.id) return ch.id;
+        }
+        return "home";
+      }
+
+      function getEmbeddedAudioSrc() {
+        const pageId = getCurrentPageId();
+        const bank = EMBEDDED_MARATHI_AUDIO && EMBEDDED_MARATHI_AUDIO[currentGender];
+        return bank && bank[pageId] ? bank[pageId] : null;
+      }
+
+      function pickMarathiTtsVoice() {
+        if (!synth) return null;
+        const voices = synth.getVoices();
+        const mrVoices = voices.filter((v) => v.lang && v.lang.toLowerCase().startsWith("mr"));
+        if (mrVoices.length) {
+          const preferred = mrVoices.find((v) =>
+            currentGender === "female"
+              ? /aarohi|female|woman/i.test(v.name)
+              : /manohar|male|man/i.test(v.name)
+          );
+          return preferred || mrVoices[0];
+        }
+        return voices.find((v) => v.lang === "hi-IN") || null;
+      }
+
+      if (synth && typeof synth.onvoiceschanged !== "undefined") {
+        synth.onvoiceschanged = pickMarathiTtsVoice;
+      }
+
+      function getVisiblePrayerChunks() {
+        const mainEl = document.getElementById("app-main") || document.body;
+        const clone = mainEl.cloneNode(true);
+        clone.querySelectorAll("svg, script, style, .img-fallback").forEach((el) => el.remove());
+        return clone.innerText
+          .split(/\n+/)
+          .map((line) => line.replace(/\|+\s*[०-९0-9]+\s*\|+/g, " ").replace(/[|॥।]+/g, " ").trim())
+          .filter((line) => line.length > 0);
+      }
+
+      function speakNextChunk() {
+        if (!synth || currentIndex >= chunks.length) {
+          resetPlayer();
+          return;
+        }
+        const utter = new SpeechSynthesisUtterance(chunks[currentIndex]);
+        utter.lang = "mr-IN";
+        utter.rate = speeds[speedIndex] * 0.9;
+        const voice = pickMarathiTtsVoice();
+        if (voice) utter.voice = voice;
+
+        utter.onend = () => {
+          if (isPlaying && !isPaused && activeMode === "tts") {
+            currentIndex++;
+            speakNextChunk();
+          }
+        };
+        utter.onerror = () => resetPlayer();
+        synth.speak(utter);
+      }
+
+      function startPlayback() {
+        const mp3Src = getEmbeddedAudioSrc();
+        if (mp3Src) {
+          activeMode = "mp3";
+          audioEl.src = mp3Src;
+          audioEl.playbackRate = speeds[speedIndex];
+          audioEl.play().then(() => {
+            isPlaying = true;
+            isPaused = false;
+            playBtn.textContent = "⏸ थांबा";
+            stopBtn.hidden = false;
+          }).catch(() => {
+            resetPlayer();
+          });
+          return;
+        }
+
+        // Fallback to browser TTS if embedded audio hasn't been added yet
+        if (!synth) return;
+        chunks = getVisiblePrayerChunks();
+        if (!chunks.length) return;
+        activeMode = "tts";
+        isPlaying = true;
+        isPaused = false;
+        currentIndex = 0;
+        playBtn.textContent = "⏸ थांबा";
+        stopBtn.hidden = false;
+        speakNextChunk();
+      }
+
+      function resetPlayer() {
+        audioEl.pause();
+        audioEl.currentTime = 0;
+        if (synth) synth.cancel();
+        isPlaying = false;
+        isPaused = false;
+        activeMode = null;
+        currentIndex = 0;
+        playBtn.textContent = "🔊 ऐका";
+        stopBtn.hidden = true;
+      }
+
+      audioEl.addEventListener("ended", resetPlayer);
+      audioEl.addEventListener("error", resetPlayer);
+
+      window.stopBalopasanaTts = resetPlayer;
+      window.syncBalopasanaTts = function (hasFooter) {
+        if (hasFooter) {
+          bar.classList.add("with-footer");
+        } else {
+          bar.classList.remove("with-footer");
+        }
+      };
+
+      playBtn.addEventListener("click", () => {
+        if (!isPlaying) {
+          startPlayback();
+        } else if (!isPaused) {
+          if (activeMode === "mp3") audioEl.pause();
+          else if (synth) synth.pause();
+          isPaused = true;
+          playBtn.textContent = "▶ सुरू करा";
+        } else {
+          if (activeMode === "mp3") audioEl.play();
+          else if (synth) synth.resume();
+          isPaused = false;
+          playBtn.textContent = "⏸ थांबा";
+        }
+      });
+
+      stopBtn.addEventListener("click", resetPlayer);
+
+      voiceBtn.addEventListener("click", () => {
+        currentGender = currentGender === "female" ? "male" : "female";
+        try {
+          localStorage.setItem(VOICE_STORAGE_KEY, currentGender);
+        } catch (e) {}
+        updateVoiceButton();
+
+        if (isPlaying) {
+          const wasPaused = isPaused;
+          resetPlayer();
+          if (!wasPaused) startPlayback();
+        }
+      });
+
+      speedBtn.addEventListener("click", () => {
+        speedIndex = (speedIndex + 1) % speeds.length;
+        speedBtn.textContent = speeds[speedIndex] + "x";
+        if (isPlaying && activeMode === "mp3") {
+          audioEl.playbackRate = speeds[speedIndex];
+        } else if (isPlaying && !isPaused && activeMode === "tts" && synth) {
+          synth.cancel();
+          speakNextChunk();
+        }
+      });
+
+      window.addEventListener("beforeunload", resetPlayer);
+    })();
+
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("./sw.js");
+      });
+    }
+  </script>
 </body>
 </html>
